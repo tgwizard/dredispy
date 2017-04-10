@@ -131,6 +131,36 @@ def keys_handler(command, args):
     return RedisArray([RedisString(key) for key in result])
 
 
+def mget_handler(command, args):
+    global _storage
+
+    if len(args) == 0:
+        raise WrongNumberOfArgumentsError(command)
+
+    result = [_storage.get(key) for key in args]
+    return RedisArray([RedisString(key) if key is not None else NullBulkString() for key in result])
+
+
+def mset_handler(command, args):
+    global _storage
+
+    if len(args) % 2 != 0:
+        raise WrongNumberOfArgumentsError(command)
+
+    i = 0
+    while i < len(args):
+        key = args[i]
+        value = args[i+1]
+
+        logger.info('Setting key: key=%s, value=%s', key, value)
+        _storage[key] = value
+        _remove_key_from_expiration(key)
+
+        i += 2
+
+    return RedisString(b'OK')
+
+
 def ping_handler(command, args):
     if len(args) == 0:
         return RedisString('PONG')
@@ -207,6 +237,8 @@ def set_handler(command, args):
 _CMD_HANDLERS = {
     b'GET': get_handler,
     b'KEYS': keys_handler,
+    b'MGET': mget_handler,
+    b'MSET': mset_handler,
     b'PING': ping_handler,
     b'QUIT': quit_handler,
     b'SET': set_handler,
