@@ -1,5 +1,10 @@
+import re
+import logging
+
 from typing import List, Union
 
+
+logger = logging.getLogger(__name__)
 
 _storage = {}
 
@@ -51,12 +56,30 @@ class RedisString(RedisData):
 class BulkString(RedisString):
     def to_resp(self):
         l = str(len(self.data)).encode()
-        return b''.join((b'$', l, '\r\n', self.data, b'\r\n'))
+        return b''.join((b'$', l, b'\r\n', self.data, b'\r\n'))
 
 
 class NullBulkString(RedisData):
     def to_resp(self):
         return b'$-1\r\n'
+
+
+class RedisArray(RedisData):
+    def __init__(self, items: List[RedisData]):
+        self.items = items
+
+    def to_resp(self):
+        l = str(len(self.items)).encode()
+        items_resp = tuple(i.to_resp() for i in self.items)
+        return b''.join((b'*', l, b'\r\n') + items_resp)
+
+
+def build_re_from_pattern(pattern: str):
+    logger.warning('P!!!!!: %s', pattern)
+    pattern = re.sub('(?<!\\\\)\\*', '.*', pattern)
+    pattern = re.sub('(?<!\\\\)\\?', '.?', pattern)
+    logger.warning('PPPP: %s', pattern)
+    return re.compile('^%s$' % pattern)
 
 
 def get_handler(command, args):
@@ -70,6 +93,22 @@ def get_handler(command, args):
     if value is None:
         return NullBulkString()
     return RedisString(value)
+
+
+def keys_handler(command, args):
+    global _storage
+
+    if len(args) != 1:
+        raise WrongNumberOfArgumentsError(command)
+
+    result = []
+    pattern_re = build_re_from_pattern(args[0].decode())
+    logger.info('Will filter keys by pattern: re=%s', pattern_re.pattern)
+    for key in _storage.keys():
+        if pattern_re.fullmatch(key.decode()):
+            result.append(key)
+
+    return RedisArray([RedisString(key) for key in result])
 
 
 def ping_handler(command, args):
@@ -98,6 +137,7 @@ def set_handler(command, args):
 
 _CMD_HANDLERS = {
     b'GET': get_handler,
+    b'KEYS': keys_handler,
     b'PING': ping_handler,
     b'QUIT': quit_handler,
     b'SET': set_handler,
