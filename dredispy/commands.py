@@ -1,12 +1,20 @@
 import re
 import logging
+import heapq
+from datetime import datetime, timedelta
 
+import gevent
+import itertools
 from typing import List, Union
 
 
 logger = logging.getLogger(__name__)
 
 _storage = {}
+_expiration_pq = []
+_expiration_key_finder = {}
+_expiration_counter = itertools.count()
+_removed_sentinel = object()
 
 
 class QuitConnection(Exception):
@@ -45,6 +53,11 @@ class WrongNumberOfArgumentsError(RedisError):
         )
 
 
+class CommandSyntaxError(RedisError):
+    def __init__(self):
+        super(CommandSyntaxError, self).__init__('syntax error')
+
+
 class RedisString(RedisData):
     def __init__(self, data: Union[str, bytes]):
         self.data = data if isinstance(data, bytes) else data.encode('utf-8')
@@ -80,6 +93,13 @@ def build_re_from_pattern(pattern: str):
     pattern = re.sub('(?<!\\\\)\\?', '.?', pattern)
     logger.warning('PPPP: %s', pattern)
     return re.compile('^%s$' % pattern)
+
+
+def ensure_int(v: bytes) -> int:
+    try:
+        return int(v)
+    except ValueError:
+        raise RedisError('value is not an integer or out of range')
 
 
 def get_handler(command, args):
@@ -127,10 +147,59 @@ def quit_handler(command, args):
 def set_handler(command, args):
     global _storage
 
-    assert len(args) >= 2
+    if len(args) < 2:
+        raise WrongNumberOfArgumentsError(command)
+
     key = args[0]
     value = args[1]
+
+    nx = False
+    xx = False
+    ex = None
+    px = None
+
+    if len(args) > 2:
+        i = 2
+        while i < len(args):
+            if args[i] == b'nx':
+                nx = True
+            elif args[i] == b'xx':
+                xx = True
+            elif args[i] == b'ex':
+                if i >= len(args):
+                    raise CommandSyntaxError()
+                ex = ensure_int(args[i+1])
+                i += 1
+            elif args[i] == b'px':
+                if i >= len(args):
+                    raise CommandSyntaxError()
+                px = ensure_int(args[i+1])
+                i += 1
+            i += 1
+
+    if xx and nx:
+        raise CommandSyntaxError()
+
+    if ex and px:
+        raise CommandSyntaxError()
+
+    key_exists = key in _storage
+    if key_exists and nx:
+        logger.info('Not setting key, exists and nx is specified: key=%s', key)
+        return NullBulkString()
+    if not key_exists and xx:
+        logger.info('Not setting key, doesnt exist and xx is specified: key=%s', key)
+        return NullBulkString()
+
+    logger.info('Setting key: key=%s, value=%s', key, value)
     _storage[key] = value
+
+    if px:
+        _set_expiry_for_key(key, px)
+    elif ex:
+        _set_expiry_for_key(key, ex * 1000)
+    else:
+        _remove_key_from_expiration(key)
 
     return RedisString(b'OK')
 
@@ -152,3 +221,58 @@ def process_command(cmd_parts: List[bytes]):
         raise UnknownCommandError(command)
 
     return command_handler(command, cmd_parts[1:])
+
+
+def periodic_handler():
+    while True:
+        gevent.sleep(1)
+        now = datetime.utcnow()
+
+        logger.debug('Running periodic handler: now=%s', now)
+
+        while _expiration_pq and _expiration_pq[0][0] < now:
+            key = _pop_expiration_key()
+            if not key:
+                continue
+            logger.info('Evicting expired key: key=%s', key)
+            _storage.pop(key, None)
+
+
+def _set_expiry_for_key(key: bytes, milliseconds: int):
+    expires_at = datetime.utcnow() + timedelta(milliseconds=milliseconds)
+    logger.info(
+        'Setting expiry for key: key=%s, milliseconds=%s, expires_at=%s',
+        key, milliseconds, expires_at
+    )
+
+    if key in _expiration_key_finder:
+        _remove_key_from_expiration(key)
+
+    count = next(_expiration_counter)
+    entry = [expires_at, count, key]
+    _expiration_key_finder[key] = entry
+
+    heapq.heappush(_expiration_pq, entry)
+
+
+def _remove_key_from_expiration(key):
+    logger.info('Removing expiry for key: key=%s', key)
+    entry = _expiration_key_finder.pop(key, None)
+    if entry is None:
+        return
+    entry[-1] = _removed_sentinel
+
+
+def _pop_expiration_key():
+    while _expiration_pq:
+        expires_at, count, key = heapq.heappop(_expiration_pq)
+        if key is not _removed_sentinel:
+            del _expiration_key_finder[key]
+            return key
+    return None
+
+
+def _peek_expiration_entry():
+    if not _expiration_pq:
+        return None
+    return _expiration_pq

@@ -1,15 +1,26 @@
 import logging
 import sys
 
+import gevent
 from gevent.server import StreamServer
 
+from dredispy.commands import periodic_handler
 from dredispy.server import connection_handler
+
+
+logger = logging.getLogger(__name__)
 
 
 def main():
     configure_logging()
 
-    server = StreamServer(('127.0.0.1', 9000), connection_handler)
+    gevent.spawn(periodic_handler)
+
+    address = '127.0.0.1'
+    port = 9000
+
+    server = StreamServer((address, port), connection_handler)
+    logger.info('Listening on %s:%s', address, port)
     server.serve_forever()
 
 
