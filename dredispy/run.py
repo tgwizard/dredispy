@@ -27,7 +27,7 @@ def main():
     server.serve_forever()
 
 
-def periodic_task(command_processor):
+def periodic_task(command_processor: CommandProcessor):
     while True:
         gevent.sleep(5)
         command_processor.process_periodic_task()

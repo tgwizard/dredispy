@@ -40,7 +40,7 @@ class CommandProcessor(object):
     _expiration_counter = itertools.count()
     _removed_sentinel = object()
 
-    def get_handler(self, command, args):
+    def get_handler(self, command, args, now):
         if len(args) != 1:
             raise WrongNumberOfArgumentsError(command)
 
@@ -48,9 +48,11 @@ class CommandProcessor(object):
         value = self._storage.get(key)
         if value is None:
             return RedisNullBulkString()
+        if not self._is_key_active(key, now):
+            return RedisNullBulkString()
         return RedisString(value)
 
-    def keys_handler(self, command, args):
+    def keys_handler(self, command, args, now):
         if len(args) != 1:
             raise WrongNumberOfArgumentsError(command)
 
@@ -58,23 +60,32 @@ class CommandProcessor(object):
         pattern_re = build_re_from_pattern(args[0].decode())
         logger.info('Will filter keys by pattern: re=%s', pattern_re.pattern)
         for key in self._storage.keys():
-            if pattern_re.fullmatch(key.decode()):
-                result.append(key)
+            if not pattern_re.fullmatch(key.decode()):
+                continue
+            if not self._is_key_active(key, now):
+                continue
+            result.append(key)
 
         return RedisArray([RedisString(key) for key in result])
 
-    def mget_handler(self, command, args):
+    def mget_handler(self, command, args, now):
         if len(args) == 0:
             raise WrongNumberOfArgumentsError(command)
 
-        result = [self._storage.get(key) for key in args]
+        result = [
+            self._storage.get(key) if self._is_key_active(key, now) else None
+            for key in args
+        ]
         return RedisArray([
-            RedisString(key) if key is not None else RedisNullBulkString() for key in result
+            RedisString(key) if key is not None else RedisNullBulkString()
+            for key in result
         ])
 
-    def mset_handler(self, command, args):
+    def mset_handler(self, command, args, now):
         global _storage
 
+        if len(args) < 2:
+            raise WrongNumberOfArgumentsError(command)
         if len(args) % 2 != 0:
             raise WrongNumberOfArgumentsError(command)
 
@@ -91,7 +102,7 @@ class CommandProcessor(object):
 
         return RedisString(b'OK')
 
-    def ping_handler(self, command, args):
+    def ping_handler(self, command, args, now):
         if len(args) == 0:
             return RedisString('PONG')
         elif len(args) == 1:
@@ -99,7 +110,7 @@ class CommandProcessor(object):
         else:
             raise WrongNumberOfArgumentsError(command)
 
-    def set_handler(self, command, args):
+    def set_handler(self, command, args, now):
         if len(args) < 2:
             raise WrongNumberOfArgumentsError(command)
 
@@ -148,15 +159,16 @@ class CommandProcessor(object):
         self._storage[key] = value
 
         if px:
-            self._set_expiry_for_key(key, px)
+            self._set_expiry_for_key(key, px, now)
         elif ex:
-            self._set_expiry_for_key(key, ex * 1000)
+            self._set_expiry_for_key(key, ex * 1000, now)
         else:
             self._remove_key_from_expiration(key)
 
         return RedisString(b'OK')
 
     def process_command(self, cmd_parts: List[bytes]) -> RedisData:
+        now = datetime.utcnow()
         assert len(cmd_parts) > 0
         command = cmd_parts[0]
 
@@ -164,7 +176,7 @@ class CommandProcessor(object):
         if not command_handler:
             raise UnknownCommandError(command)
 
-        return command_handler(command, cmd_parts[1:])
+        return command_handler(command, cmd_parts[1:], now=now)
 
     def process_periodic_task(self):
         now = datetime.utcnow()
@@ -178,8 +190,8 @@ class CommandProcessor(object):
             logger.info('Evicting expired key: key=%s', key)
             self._storage.pop(key, None)
 
-    def _set_expiry_for_key(self, key: bytes, milliseconds: int):
-        expires_at = datetime.utcnow() + timedelta(milliseconds=milliseconds)
+    def _set_expiry_for_key(self, key: bytes, milliseconds: int, now: datetime):
+        expires_at = now + timedelta(milliseconds=milliseconds)
         logger.info(
             'Setting expiry for key: key=%s, milliseconds=%s, expires_at=%s',
             key, milliseconds, expires_at
@@ -209,7 +221,10 @@ class CommandProcessor(object):
                 return key
         return None
 
-    def _peek_expiration_entry(self):
-        if not self._expiration_pq:
-            return None
-        return self._expiration_pq
+    def _is_key_active(self, key, now):
+        entry = self._expiration_key_finder.get(key)
+        if not entry:
+            return True
+        if entry[0] >= now:
+            return True
+        return False
