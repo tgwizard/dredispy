@@ -2,45 +2,41 @@ import logging
 
 from socket import socket as _socket
 
-from dredispy.commands import process_command, RedisError, RedisData
+from dredispy.command import CommandProcessor
+from dredispy.data import RedisError, RedisData, RESPType
 
 logger = logging.getLogger(__name__)
 
 
-class RESPType(object):
-    String = b'+'
-    Error = b'-'
-    Integer = b':'
-    BulkString = b'$'
-    Array = b'*'
+class RedisServer(object):
+    def __init__(self, command_processor: CommandProcessor):
+        self.command_processor = command_processor
 
+    def connection_handler(self, socket: _socket, address):
+        logger.info('New connection: socket=%s, address=%s', socket, address)
 
-def connection_handler(socket: _socket, address):
-    logger.info('New connection: socket=%s, address=%s', socket, address)
-
-    try:
-        for cmd_parts in command_reader(socket):
-            logger.info('Received data: cmd_parts=%s', cmd_parts)
-            assert (t == RESPType.String for t, _ in cmd_parts), \
-                'All client command parts must be strings'
-
-            cmd = [d for _, d in cmd_parts]
-            try:
-                result = process_command(cmd)
-                logger.info('Command response: r=%s', result)
-                write(socket, result)
-            except RedisError as e:
-                logger.info('Redis error: e=%s', e.to_resp())
-                write(socket, e)
-
-    except Exception:
-        logger.exception('Exception using socket: socket=%s, address=%s', socket, address)
-    finally:
-        logger.info('Closing connection: socket=%s, address=%s', socket, address)
         try:
-            socket.close()
+            for cmd_parts in command_reader(socket):
+                logger.info('Received data: cmd_parts=%s', cmd_parts)
+                assert (t == RESPType.String for t, _ in cmd_parts), \
+                    'All client command parts must be strings'
+
+                cmd = [d for _, d in cmd_parts]
+                try:
+                    result = self.command_processor.process_command(cmd)
+                    logger.info('Command response: r=%s', result)
+                    write(socket, result)
+                except RedisError as e:
+                    logger.info('Redis error: e=%s', e.to_resp())
+                    write(socket, e)
         except Exception:
-            logger.exception('Exception closing socket: socket=%s, address=%s', socket, address)
+            logger.exception('Exception using socket: socket=%s, address=%s', socket, address)
+        finally:
+            logger.info('Closing connection: socket=%s, address=%s', socket, address)
+            try:
+                socket.close()
+            except Exception:
+                logger.exception('Exception closing socket: socket=%s, address=%s', socket, address)
 
 
 def command_reader(socket):
