@@ -3,7 +3,7 @@ import logging
 from socket import socket as _socket
 
 from dredispy.command import CommandProcessor
-from dredispy.data import RedisError, RedisData, RESPType
+from dredispy.protocol import RedisError, RedisData, RESPType
 
 logger = logging.getLogger(__name__)
 

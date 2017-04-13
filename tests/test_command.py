@@ -5,7 +5,7 @@ from unittest.mock import Mock
 import pytest
 
 from dredispy.command import CommandProcessor, build_re_from_pattern, Storage
-from dredispy.data import (
+from dredispy.protocol import (
     WrongNumberOfArgumentsError,
     RedisString,
     RedisArray,

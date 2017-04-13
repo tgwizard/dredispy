@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 from gevent.pool import Pool
 from typing import List, Union, Tuple
 
-from dredispy.data import (
+from dredispy.protocol import (
     RedisError,
     UnknownCommandError,
     CommandSyntaxError,

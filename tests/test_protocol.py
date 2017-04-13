@@ -1,6 +1,6 @@
 import pytest
 
-from dredispy.data import (
+from dredispy.protocol import (
     RedisError,
     WrongNumberOfArgumentsError,
     RedisString,
