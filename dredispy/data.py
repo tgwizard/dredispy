@@ -73,6 +73,15 @@ class RedisNullBulkString(RedisData):
         return b'$-1\r\n'
 
 
+class RedisInteger(RedisData):
+    def __init__(self, data: int):
+        self.data = data
+
+    def to_resp(self) -> bytes:
+        b = str(self.data).encode()
+        return b''.join((b':', b, b'\r\n'))
+
+
 class RedisArray(RedisData):
     def __init__(self, items: List[RedisData]):
         self.items = items
@@ -81,3 +90,11 @@ class RedisArray(RedisData):
         l = str(len(self.items)).encode()
         items_resp = tuple(i.to_resp() for i in self.items)
         return b''.join((b'*', l, b'\r\n') + items_resp)
+
+
+class RedisMultipleResponses(RedisData):
+    def __init__(self, responses: List[RedisData]):
+        self.responses = responses
+
+    def to_resp(self):
+        return b''.join(r.to_resp() for r in self.responses)

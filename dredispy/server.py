@@ -12,6 +12,7 @@ class Connection(object):
     def __init__(self, socket: _socket, address):
         self.socket = socket
         self.address = address
+        self.state = 'normal'
 
     def write(self, data: RedisData):
         b = data.to_resp()
@@ -118,7 +119,7 @@ class RedisServer(object):
         try:
             for cmd in connection.command_stream():
                 try:
-                    result = self.command_processor.process_command(cmd)
+                    result = self.command_processor.process_command(cmd, connection=connection)
                     connection.write(result)
                 except RedisError as e:
                     connection.write(e)
