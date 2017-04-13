@@ -30,7 +30,7 @@ def build_re_from_pattern(pattern: Union[str, bytes]):
     if isinstance(pattern, bytes):
         pattern = pattern.decode()
     pattern = re.sub('(?<!\\\\)\\*', '.*', pattern)
-    pattern = re.sub('(?<!\\\\)\\?', '.?', pattern)
+    pattern = re.sub('(?<!\\\\)\\?', '.', pattern)
     return re.compile('^%s$' % pattern)
 
 
@@ -111,17 +111,15 @@ class CommandHandler(object):
     def __init__(self, storage: Storage):
         self.storage = storage
 
-    def get_handler(self, command, args, now, connection):
-        if len(args) != 1:
+    def cmd_ping(self, command, args, now, connection):
+        if len(args) == 0:
+            return RedisString('PONG')
+        elif len(args) == 1:
+            return RedisString(args[0])
+        else:
             raise WrongNumberOfArgumentsError(command)
 
-        key = args[0]
-        value = self.storage.get_active_key(key, now)
-        if value is None:
-            return RedisNullBulkString()
-        return RedisString(value)
-
-    def keys_handler(self, command, args, now, connection):
+    def cmd_keys(self, command, args, now, connection):
         if len(args) != 1:
             raise WrongNumberOfArgumentsError(command)
 
@@ -137,45 +135,17 @@ class CommandHandler(object):
 
         return RedisArray([RedisString(key) for key in result])
 
-    def mget_handler(self, command, args, now, connection):
-        if len(args) == 0:
+    def cmd_get(self, command, args, now, connection):
+        if len(args) != 1:
             raise WrongNumberOfArgumentsError(command)
 
-        result = [self.storage.get_active_key(key, now) for key in args]
-        return RedisArray([
-            RedisString(key) if key is not None else RedisNullBulkString() for key in result
-        ])
+        key = args[0]
+        value = self.storage.get_active_key(key, now)
+        if value is None:
+            return RedisNullBulkString()
+        return RedisBulkString(value)
 
-    def mset_handler(self, command, args, now, connection):
-        global _storage
-
-        if len(args) < 2:
-            raise WrongNumberOfArgumentsError(command)
-        if len(args) % 2 != 0:
-            raise WrongNumberOfArgumentsError(command)
-
-        i = 0
-        while i < len(args):
-            key = args[i]
-            value = args[i+1]
-
-            logger.info('Setting key: key=%s, value=%s', key, value)
-            self.storage.kv[key] = value
-            self.storage.remove_key_from_expiration(key)
-
-            i += 2
-
-        return RedisString(b'OK')
-
-    def ping_handler(self, command, args, now, connection):
-        if len(args) == 0:
-            return RedisString('PONG')
-        elif len(args) == 1:
-            return RedisString(args[0])
-        else:
-            raise WrongNumberOfArgumentsError(command)
-
-    def set_handler(self, command, args, now, connection):
+    def cmd_set(self, command, args, now, connection):
         if len(args) < 2:
             raise WrongNumberOfArgumentsError(command)
 
@@ -232,6 +202,36 @@ class CommandHandler(object):
 
         return RedisString(b'OK')
 
+    def cmd_mget(self, command, args, now, connection):
+        if len(args) == 0:
+            raise WrongNumberOfArgumentsError(command)
+
+        result = [self.storage.get_active_key(key, now) for key in args]
+        return RedisArray([
+            RedisString(key) if key is not None else RedisNullBulkString() for key in result
+        ])
+
+    def cmd_mset(self, command, args, now, connection):
+        global _storage
+
+        if len(args) < 2:
+            raise WrongNumberOfArgumentsError(command)
+        if len(args) % 2 != 0:
+            raise WrongNumberOfArgumentsError(command)
+
+        i = 0
+        while i < len(args):
+            key = args[i]
+            value = args[i+1]
+
+            logger.info('Setting key: key=%s, value=%s', key, value)
+            self.storage.kv[key] = value
+            self.storage.remove_key_from_expiration(key)
+
+            i += 2
+
+        return RedisString(b'OK')
+
 
 class PubSubHandler(object):
     def __init__(self):
@@ -249,7 +249,7 @@ class PubSubHandler(object):
         return len(self._connection_channel_map[connection]) + \
                len(self._connection_pattern_channel_map[connection])
 
-    def subscribe_handler(self, command, args: List[bytes], now, connection):
+    def cmd_subscribe(self, command, args: List[bytes], now, connection):
         if len(args) == 0:
             raise WrongNumberOfArgumentsError(command)
 
@@ -272,7 +272,7 @@ class PubSubHandler(object):
 
         return RedisMultipleResponses(responses)
 
-    def unsubscribe_handler(self, command, args, now, connection):
+    def cmd_unsubscribe(self, command, args, now, connection):
         self._ensure_connection(connection)
 
         channels_to_remove = args
@@ -298,7 +298,7 @@ class PubSubHandler(object):
 
         return RedisMultipleResponses(responses)
 
-    def psubscribe_handler(self, command, args, now, connection):
+    def cmd_psubscribe(self, command, args, now, connection):
         if len(args) == 0:
             raise WrongNumberOfArgumentsError(command)
 
@@ -318,7 +318,7 @@ class PubSubHandler(object):
 
         return RedisMultipleResponses(responses)
 
-    def punsubscribe_handler(self, command, args, now, connection):
+    def cmd_punsubscribe(self, command, args, now, connection):
         self._ensure_connection(connection)
 
         patterns_to_remove = args
@@ -343,7 +343,7 @@ class PubSubHandler(object):
 
         return RedisMultipleResponses(responses)
 
-    def publish_handler(self, command, args, now, connection):
+    def cmd_publish(self, command, args, now, connection):
         if len(args) != 2:
             raise WrongNumberOfArgumentsError(command)
 
@@ -394,7 +394,7 @@ class PubSubHandler(object):
         count = len(channel_connections) + len(pattern_connection_tuples)
         return RedisInteger(count)
 
-    def pubsub_handler(self, command, args, now, connection):
+    def cmd_pubsub(self, command, args, now, connection):
         if len(args) < 1:
             raise WrongNumberOfArgumentsError(command)
 
@@ -452,9 +452,9 @@ class CommandProcessor(object):
 
         try:
             if clean_command in PUB_SUB_COMMANDS:
-                command_handler = getattr(self.pubsub_handler, '%s_handler' % clean_command, None)
+                command_handler = getattr(self.pubsub_handler, 'cmd_%s' % clean_command, None)
             else:
-                command_handler = getattr(self.command_handler, '%s_handler' % clean_command, None)
+                command_handler = getattr(self.command_handler, 'cmd_%s' % clean_command, None)
 
             if not command_handler:
                 raise UnknownCommandError(command)
@@ -477,7 +477,6 @@ class CommandProcessor(object):
 
     def process_periodic_task(self):
         now = datetime.utcnow()
-
         logger.debug('Running periodic handler: now=%s', now)
 
         while self.storage.expiration_pq and self.storage.expiration_pq[0][0] < now:

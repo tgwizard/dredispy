@@ -29,7 +29,7 @@ class RedisError(Exception, RedisData):
     kind = 'ERR'
     msg = 'Something went wrong'
 
-    def __init__(self, msg=None, kind=None):
+    def __init__(self, msg: Union[str, None]=None, kind: Union[str, None]=None):
         self.msg = msg if msg else self.msg
         self.kind = kind if kind else self.kind
 
