@@ -1,3 +1,4 @@
+import pickle
 import re
 import logging
 import heapq
@@ -5,7 +6,9 @@ import itertools
 import weakref
 from collections import defaultdict
 from datetime import datetime, timedelta
+from time import time
 
+from gevent.fileobject import FileObjectThread
 from gevent.pool import Pool
 from typing import List, Union, Tuple
 
@@ -122,6 +125,8 @@ class DB(object):
 class Storage(object):
     def __init__(self):
         self.dbs = [DB(i) for i in range(16)]
+        self.last_snapshot_time = None
+        self.file_path = None
 
     def process_periodic_task(self):
         now = datetime.utcnow()
@@ -134,6 +139,73 @@ class Storage(object):
                     continue
                 logger.info('Evicting expired key: db=%s, key=%s', db_index, key)
                 db.kv.pop(key, None)
+
+        self._potentially_take_snapshot(now)
+
+    def _potentially_take_snapshot(self, now):
+        if not self.file_path:
+            logger.debug('Wont take snapshot, disabled')
+            return
+
+        if self.last_snapshot_time and now - self.last_snapshot_time < timedelta(seconds=10):
+            logger.debug('Wont take snapshot, too recent')
+            return
+
+        self.last_snapshot_time = now
+        snapshot = self._build_snapshot()
+
+        self._write_snapshot(snapshot)
+
+    def _build_snapshot(self) -> bytes:
+        logger.info('Building snapshot')
+        t_start = time()
+
+        # This is a stupid way of doing it.
+        pickled_data = pickle.dumps(self)
+        snapshot = b'dredispy:1:' + pickled_data
+
+        t_end = time()
+        t_elapsed = (t_end - t_start) * 1000
+        logger.info('Snapshot built: time_ms=%s', t_elapsed)
+
+        return snapshot
+
+    def _write_snapshot(self, data: bytes):
+        logger.info('Writing snapshot')
+        f = FileObjectThread(open(self.file_path, 'wb'))
+
+        try:
+            f.write(data)
+        finally:
+            try:
+                f.close()
+            except:
+                pass
+
+    @classmethod
+    def from_snapshot(cls, file_path: str) -> 'Storage':
+        logger.info('Restoring from snapshot: file_path=%s', file_path)
+
+        try:
+            f = FileObjectThread(open('./tmp/data', 'rb'))
+
+            data = None
+            try:
+                data = f.read()
+            finally:
+                try:
+                    f.close()
+                except:
+                    pass
+
+            assert data.startswith(b'dredispy:1:')
+            storage = pickle.loads(data[11:])
+        except FileNotFoundError:
+            logger.info('Snapshot not found, creating empty storage')
+            storage = Storage()
+
+        storage.file_path = file_path
+        return storage
 
 
 class CommandHandler(object):

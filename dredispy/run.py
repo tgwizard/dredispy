@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 def main():
     configure_logging()
 
-    storage = Storage()
+    storage = Storage.from_snapshot('./tmp/data')
     command_processor = CommandProcessor(storage)
     server = RedisServer(command_processor)
 
