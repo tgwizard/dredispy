@@ -171,12 +171,22 @@ class CommandProcessor(object):
         now = datetime.utcnow()
         assert len(cmd_parts) > 0
         command = cmd_parts[0]
+        args = cmd_parts[1:]
+        clean_command = command.decode().lower()[:50]
 
-        command_handler = getattr(self, '%s_handler' % command.decode().lower()[:50], None)
+        logger.info('Processing command: command=%s, args=%s', command, args)
+
+        command_handler = getattr(self, '%s_handler' % clean_command, None)
         if not command_handler:
             raise UnknownCommandError(command)
 
-        return command_handler(command, cmd_parts[1:], now=now)
+        try:
+            result = command_handler(command, args, now=now)
+        except RedisError as e:
+            logger.info('Redis error during command processing: result=%s', e.to_resp())
+            raise
+        logger.info('Command processed: result=%s', result)
+        return result
 
     def process_periodic_task(self):
         now = datetime.utcnow()
