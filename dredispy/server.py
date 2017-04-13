@@ -13,6 +13,7 @@ class Connection(object):
         self.socket = socket
         self.address = address
         self.state = 'normal'
+        self.db_index = 0
 
     def write(self, data: RedisData):
         b = data.to_resp()

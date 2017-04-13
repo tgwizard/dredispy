@@ -7,7 +7,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 
 from gevent.pool import Pool
-from typing import List, Union
+from typing import List, Union, Tuple
 
 from dredispy.data import (
     RedisError,
@@ -51,8 +51,9 @@ PUB_SUB_COMMANDS = frozenset((
 ))
 
 
-class Storage(object):
-    def __init__(self):
+class DB(object):
+    def __init__(self, index: int):
+        self.index = index
         self.kv = {}
         self.expiration_pq = []
         self._expiration_key_finder = {}
@@ -106,10 +107,41 @@ class Storage(object):
             return True
         return False
 
+    def num_keys(self, now: datetime) -> Tuple[int, int]:
+        num_active_keys = 0
+        num_keys_with_expiry = 0
+        for key in self.kv.keys():
+            if self.is_key_active(key, now):
+                num_active_keys += 1
+            if key in self._expiration_key_finder:
+                num_keys_with_expiry += 1
+
+        return num_active_keys, num_keys_with_expiry
+
+
+class Storage(object):
+    def __init__(self):
+        self.dbs = [DB(i) for i in range(16)]
+
+    def process_periodic_task(self):
+        now = datetime.utcnow()
+        logger.debug('Running periodic handler: now=%s', now)
+
+        for db_index, db in enumerate(self.dbs):
+            while db.expiration_pq and db.expiration_pq[0][0] < now:
+                key = db.pop_expiration_key()
+                if not key:
+                    continue
+                logger.info('Evicting expired key: db=%s, key=%s', db_index, key)
+                db.kv.pop(key, None)
+
 
 class CommandHandler(object):
     def __init__(self, storage: Storage):
         self.storage = storage
+
+    def _get_db(self, connection) -> DB:
+        return self.storage.dbs[connection.db_index]
 
     def cmd_ping(self, command, args, now, connection):
         if len(args) == 0:
@@ -119,17 +151,48 @@ class CommandHandler(object):
         else:
             raise WrongNumberOfArgumentsError(command)
 
+    def cmd_info(self, command, args, now, connection):
+        def db_info(db_index):
+            db = self.storage.dbs[db_index]
+            num_active_keys, num_keys_with_expiry = db.num_keys(now)
+            if db_index > 0 and num_active_keys == 0:
+                return None
+
+            return f'db{db_index}:keys={num_active_keys},expires={num_keys_with_expiry}'
+
+        db_info_rows = [db_info(0)] + [db_info(i) for i in range(1, len(self.storage.dbs))]
+        s = """
+# Keyspace
+{db_info}
+""".format(
+            db_info='\n'.join(r for r in db_info_rows if r),
+        )
+        return RedisBulkString(s.lstrip())
+
+    def cmd_select(self, command, args, now, connection):
+        if len(args) != 1:
+            raise WrongNumberOfArgumentsError(command)
+
+        db_index = ensure_int(args[0])
+        if db_index < 0 or db_index > len(self.storage.dbs):
+            raise RedisError('invalid DB index')
+
+        connection.db_index = db_index
+        return RedisString(b'OK')
+
     def cmd_keys(self, command, args, now, connection):
         if len(args) != 1:
             raise WrongNumberOfArgumentsError(command)
 
+        db = self._get_db(connection)
+
         result = []
         pattern_re = build_re_from_pattern(args[0])
         logger.info('Will filter keys by pattern: re=%s', pattern_re.pattern)
-        for key in self.storage.kv.keys():
+        for key in db.kv.keys():
             if not pattern_re.fullmatch(key.decode()):
                 continue
-            if not self.storage.is_key_active(key, now):
+            if not db.is_key_active(key, now):
                 continue
             result.append(key)
 
@@ -139,8 +202,10 @@ class CommandHandler(object):
         if len(args) != 1:
             raise WrongNumberOfArgumentsError(command)
 
+        db = self._get_db(connection)
+
         key = args[0]
-        value = self.storage.get_active_key(key, now)
+        value = db.get_active_key(key, now)
         if value is None:
             return RedisNullBulkString()
         return RedisBulkString(value)
@@ -148,6 +213,8 @@ class CommandHandler(object):
     def cmd_set(self, command, args, now, connection):
         if len(args) < 2:
             raise WrongNumberOfArgumentsError(command)
+
+        db = self._get_db(connection)
 
         key = args[0]
         value = args[1]
@@ -182,23 +249,25 @@ class CommandHandler(object):
         if ex and px:
             raise CommandSyntaxError()
 
-        key_exists = self.storage.get_active_key(key, now) is not None
+        key_exists = db.get_active_key(key, now) is not None
         if key_exists and nx:
-            logger.info('Not setting key, exists and nx is specified: key=%s', key)
+            logger.info('Not setting key, exists and nx is specified: db=%s, key=%s', db.index, key)
             return RedisNullBulkString()
         if not key_exists and xx:
-            logger.info('Not setting key, doesnt exist and xx is specified: key=%s', key)
+            logger.info(
+                'Not setting key, doesnt exist and xx is specified: db=%s, key=%s', db.index, key,
+            )
             return RedisNullBulkString()
 
-        logger.info('Setting key: key=%s, value=%s', key, value)
-        self.storage.kv[key] = value
+        logger.info('Setting key: db=%s, key=%s, value=%s', db.index, key, value)
+        db.kv[key] = value
 
         if px:
-            self.storage.set_expiry_for_key(key, px, now)
+            db.set_expiry_for_key(key, px, now)
         elif ex:
-            self.storage.set_expiry_for_key(key, ex * 1000, now)
+            db.set_expiry_for_key(key, ex * 1000, now)
         else:
-            self.storage.remove_key_from_expiration(key)
+            db.remove_key_from_expiration(key)
 
         return RedisString(b'OK')
 
@@ -206,7 +275,9 @@ class CommandHandler(object):
         if len(args) == 0:
             raise WrongNumberOfArgumentsError(command)
 
-        result = [self.storage.get_active_key(key, now) for key in args]
+        db = self._get_db(connection)
+
+        result = [db.get_active_key(key, now) for key in args]
         return RedisArray([
             RedisString(key) if key is not None else RedisNullBulkString() for key in result
         ])
@@ -219,14 +290,16 @@ class CommandHandler(object):
         if len(args) % 2 != 0:
             raise WrongNumberOfArgumentsError(command)
 
+        db = self._get_db(connection)
+
         i = 0
         while i < len(args):
             key = args[i]
             value = args[i+1]
 
-            logger.info('Setting key: key=%s, value=%s', key, value)
-            self.storage.kv[key] = value
-            self.storage.remove_key_from_expiration(key)
+            logger.info('Setting key: db=%s, key=%s, value=%s', db.index, key, value)
+            db.kv[key] = value
+            db.remove_key_from_expiration(key)
 
             i += 2
 
@@ -435,9 +508,8 @@ class PubSubHandler(object):
 
 
 class CommandProcessor(object):
-    def __init__(self):
-        self.storage = Storage()
-        self.command_handler = CommandHandler(self.storage)
+    def __init__(self, storage: Storage):
+        self.command_handler = CommandHandler(storage)
         self.pubsub_handler = PubSubHandler()
 
     def process_command(self, cmd_parts: List[bytes], connection) -> RedisData:
@@ -474,14 +546,3 @@ class CommandProcessor(object):
             raise
         logger.info('Command processed: result=%s', result)
         return result
-
-    def process_periodic_task(self):
-        now = datetime.utcnow()
-        logger.debug('Running periodic handler: now=%s', now)
-
-        while self.storage.expiration_pq and self.storage.expiration_pq[0][0] < now:
-            key = self.storage.pop_expiration_key()
-            if not key:
-                continue
-            logger.info('Evicting expired key: key=%s', key)
-            self.storage.kv.pop(key, None)

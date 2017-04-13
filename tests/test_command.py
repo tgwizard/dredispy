@@ -4,7 +4,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from dredispy.command import CommandProcessor, build_re_from_pattern
+from dredispy.command import CommandProcessor, build_re_from_pattern, Storage
 from dredispy.data import (
     WrongNumberOfArgumentsError,
     RedisString,
@@ -16,8 +16,13 @@ from dredispy.server import Connection
 
 
 @pytest.fixture()
-def command_processor():
-    return CommandProcessor()
+def storage():
+    return Storage()
+
+
+@pytest.fixture()
+def command_processor(storage):
+    return CommandProcessor(storage)
 
 
 @pytest.fixture()
@@ -80,9 +85,10 @@ class TestCmdKeys(object):
         ([b'foo?'], [b'foo1', b'foo2']),
         ([b'*expired'], [b'not-yet-expired']),
     ])
-    def test_keys_return_matching_keys(self, command_processor, connection, args, expected_result):
+    def test_keys_return_matching_keys(
+            self, storage, command_processor, connection, args, expected_result):
         now = datetime.utcnow()
-        command_processor.storage.kv = {
+        storage.dbs[0].kv = {
             b'foo': b'1',
             b'foo1': b'1',
             b'foo2': b'1',
@@ -90,9 +96,12 @@ class TestCmdKeys(object):
             b'expired': b'1',
             b'not-yet-expired': b'1',
         }
+        storage.dbs[3].kv = {
+            b'foo3': b'1'
+        }
 
-        command_processor.storage.set_expiry_for_key(b'expired', 0, now)
-        command_processor.storage.set_expiry_for_key(b'not-yet-expired', 2000, now)
+        storage.dbs[0].set_expiry_for_key(b'expired', 0, now)
+        storage.dbs[0].set_expiry_for_key(b'not-yet-expired', 2000, now)
 
         result = command_processor.process_command([b'keys'] + args, connection=connection)
 
@@ -121,17 +130,18 @@ class TestCmdGet(object):
         # Don't support globbing
         ([b'fo*'], RedisNullBulkString()),
     ])
-    def test_keys_return_matching_keys(self, command_processor, connection, args, expected_result):
+    def test_keys_return_matching_keys(
+            self, storage, command_processor, connection, args, expected_result):
         now = datetime.utcnow()
-        command_processor.storage.kv = {
+        storage.dbs[0].kv = {
             b'foo': b'foo-val',
             b'with spaces in ': b'spaces val here\r\nx',
             b'expired': b'1',
             b'not-yet-expired': b'2',
         }
 
-        command_processor.storage.set_expiry_for_key(b'expired', 0, now)
-        command_processor.storage.set_expiry_for_key(b'not-yet-expired', 2000, now)
+        storage.dbs[0].set_expiry_for_key(b'expired', 0, now)
+        storage.dbs[0].set_expiry_for_key(b'not-yet-expired', 2000, now)
 
         result = command_processor.process_command([b'get'] + args, connection=connection)
 

@@ -4,7 +4,7 @@ import sys
 import gevent
 from gevent.server import StreamServer
 
-from dredispy.command import CommandProcessor
+from dredispy.command import CommandProcessor, Storage
 from dredispy.server import RedisServer
 
 
@@ -14,10 +14,11 @@ logger = logging.getLogger(__name__)
 def main():
     configure_logging()
 
-    command_processor = CommandProcessor()
+    storage = Storage()
+    command_processor = CommandProcessor(storage)
     server = RedisServer(command_processor)
 
-    gevent.spawn(periodic_task, command_processor=command_processor)
+    gevent.spawn(periodic_task, storage=storage)
 
     address = '127.0.0.1'
     port = 9000
@@ -27,10 +28,10 @@ def main():
     server.serve_forever()
 
 
-def periodic_task(command_processor: CommandProcessor):
+def periodic_task(storage: Storage):
     while True:
         gevent.sleep(5)
-        command_processor.process_periodic_task()
+        storage.process_periodic_task()
 
 
 def configure_logging():
