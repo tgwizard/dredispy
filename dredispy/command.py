@@ -355,8 +355,6 @@ class CommandHandler(object):
         ])
 
     def cmd_mset(self, command, args, now, connection):
-        global _storage
-
         if len(args) < 2:
             raise WrongNumberOfArgumentsError(command)
         if len(args) % 2 != 0:
@@ -376,6 +374,21 @@ class CommandHandler(object):
             i += 2
 
         return RedisString(b'OK')
+
+    def cmd_del(self, command, args, now, connection):
+        if len(args) < 1:
+            raise WrongNumberOfArgumentsError(command)
+
+        db = self._get_db(connection)
+        count = 0
+        for key in args:
+            if key in db.kv and db.is_key_active(key, now):
+                logger.info('Removing key: db=%s, key=%s', db.index, key)
+                del db.kv[key]
+                db.remove_key_from_expiration(key)
+                count += 1
+
+        return RedisInteger(count)
 
 
 class PubSubHandler(object):
